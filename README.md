@@ -30,3 +30,14 @@ Or the same with no password for the local server:
 
     SOCKS5_SERVER=socks.example.org:1080 SOCKS5_USER=user2 SOCKS5_PASSWORD=password2 \
       ./socks-relay.py localhost:1080
+
+
+This scripts requires `python3` and the `pysocks` module, install it for instance with:
+
+    pip3 install --user pysocks
+
+
+This script is a derivative work from the toy socks server published
+at https://github.com/rushter/socks5
+which is itself under the MIT license and copyright reproduced in the script
+comments and in the `LICENSE` file.
