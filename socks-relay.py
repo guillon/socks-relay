@@ -108,6 +108,11 @@ class SocksProxy(BaseRequestHandler):
         self.request.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.username = os.environ.get('SERVER_USER', None)
         self.password = os.environ.get('SERVER_PASSWORD', None)
+        if self.username:
+            if not self.password: self.password = ""
+            self.method = SOCKS5_METHOD_USERPASS
+        else:
+            self.method = SOCKS5_METHOD_NOAUTH
         proxy_server = os.environ.get('SOCKS5_SERVER', None)
         if proxy_server != None:
             self.proxy_host, self.proxy_port = proxy_server.split(":")
@@ -160,20 +165,20 @@ class SocksProxy(BaseRequestHandler):
 
             # get available methods
             methods = set(self.recvall(self.request, nmethods))
-
-            # accept only NOAUTH or USERPASS auth
-            if ((self.username and self.password and not SOCKS5_METHOD_USERPASS in methods) or
-                (not SOCKS5_METHOD_NOAUTH in methods)):
+            logger.debug("client %s: Received requested methods: %s" % (self.client_address, methods))
+            if self.method not in methods:
+                logger.error("client %s: Authentication methods not available: %s" % (self.client_address, methods))
                 self.sendall(self.request, struct.pack("!BB", SOCKS_VERSION, SOCKS5_METHOD_NONE_ACCEPTABLE))
                 return
 
             # send welcome message
-            if self.username and self.password:
-                self.sendall(self.request, struct.pack("!BB", SOCKS_VERSION, SOCKS5_METHOD_USERPASS))
+            logger.debug("client %s: Sending method: %s" % (self.client_address, self.method))
+            self.sendall(self.request, struct.pack("!BB", SOCKS_VERSION, self.method))
+
+            # send credentials
+            if self.method == SOCKS5_METHOD_USERPASS:
                 if not self.verify_credentials():
                     return
-            else:
-                self.sendall(self.request, struct.pack("!BB", SOCKS_VERSION, SOCKS5_METHOD_NOAUTH))
 
             # request
             version, cmd, _, address_type = struct.unpack("!BBBB", self.recvall(self.request, 4))
@@ -243,11 +248,13 @@ class SocksProxy(BaseRequestHandler):
 
         if username == self.username and password == self.password:
             # success, status = 0
+            logger.debug("client %s: Sending succesfull authentication" % (self.client_address,))
             response = struct.pack("!BB", version, 0)
             self.sendall(self.request, response)
             return True
 
         # failure, status != 0
+        logger.error("client %s: Authentication failure for username '%s'" % (self.client_address, username))
         response = struct.pack("!BB", version, 0xFF)
         self.sendall(self.request, response)
         return False
