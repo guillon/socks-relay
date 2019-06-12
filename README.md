@@ -32,6 +32,23 @@ Or the same with no password for the local server:
       ./socks-relay.py localhost:1080
 
 
+More access control can be given through the following variables:
+
+- `SERVER_CLIENTS_ALLOWED`: comma-separated list of regexp allowed for connection, defaults to `.*`.
+  For instance `SERVER_CLIENTS_ALLOWED='127\..*\..*\..*` will allow only connetion from client addresses starting with `127.`.
+- `SERVER_CLIENTS_REFUSED`: comma-separated list of regexp refused for connection, processed after allowed list.
+  For instance `SERVER_CLIENTS_REFUSED='10\..*\..*\..*` will refuse any connection from client address starting with `10.`.
+- `SERVER_REMOTES_ALLOWED`: comma-separated list of regexp for hostname allowed to connect to, defaults to `.*`. Note that
+  for remotes, both numeric IP addresses or hostnames can be given by the client.
+  For instance `SERVER_REMOTES_ALLOWED=github.com` will allow only connections to `github.com`.
+- `SERVER_REMOTES_REFUSED`: comma-separated list of regexp for hostname not allowed to connect to, processed after allowed list.
+  For instance `SERVER_REMOTES_REFUSED=github.com` will refuse connections to `github.com`.
+
+
+Also static remote hosts resolution can be given with a map encoded in the
+`SERVER_RESOLVE_MAP` variable. For instance: `SERVER_RESOLVE_MAP='loopback=>127.0.0.1,::1=>loopback'` will
+resolve `::1` to `127.0.0.1` before connecting to `127.0.0.1`. Resolution happens after remotes host filtering.
+
 This scripts requires `python3` and the `pysocks` module, install it for instance with:
 
     pip3 install --user pysocks

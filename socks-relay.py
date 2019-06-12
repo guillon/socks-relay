@@ -54,6 +54,7 @@ import selectors
 import struct
 import socks
 import time
+import re
 from socketserver import ThreadingMixIn, TCPServer, BaseRequestHandler
 
 logger = logging.getLogger("socks-relay")
@@ -115,12 +116,37 @@ class SocksProxy(BaseRequestHandler):
             self.method = SOCKS5_METHOD_NOAUTH
         proxy_server = os.environ.get('SOCKS5_SERVER', None)
         if proxy_server != None:
-            self.proxy_host, self.proxy_port = proxy_server.split(":")
+            self.proxy_host, self.proxy_port = proxy_server.rsplit(":", 1)
             self.proxy_port = int(self.proxy_port)
         else:
             self.proxy_host, self.proxy_port = (None, None)
         self.proxy_username = os.environ.get('SOCKS5_USER', None)
         self.proxy_password = os.environ.get('SOCKS5_PASSWORD', None)
+        self.resolve_list = os.environ.get('SERVER_RESOLVE_MAP', '')
+        self.resolve_map = {}
+        for pair in [x for x in self.resolve_list.split(",") if x]:
+            x, y = pair.split("=>")
+            self.resolve_map[x] = y
+        self.clients_allowed = os.environ.get('SERVER_CLIENTS_ALLOWED', '.*')
+        self.clients_refused = os.environ.get('SERVER_CLIENTS_REFUSED', '')
+        self.clients_re_white_list = []
+        self.clients_re_black_list = []
+        for allowed in [x for x in self.clients_allowed.split(",") if x]:
+            self.clients_re_white_list.append(re.compile(allowed))
+        for refused in [x for x in self.clients_refused.split(",") if x]:
+            self.clients_re_black_list.append(re.compile(refused))
+        self.remotes_allowed = os.environ.get('SERVER_REMOTES_ALLOWED', '.*')
+        self.remotes_refused = os.environ.get('SERVER_REMOTES_REFUSED', '')
+        self.remotes_re_white_list = []
+        self.remotes_re_black_list = []
+        for allowed in [x for x in self.remotes_allowed.split(",") if x]:
+            self.remotes_re_white_list.append(re.compile(allowed))
+        for refused in [x for x in self.remotes_refused.split(",") if x]:
+            self.remotes_re_black_list.append(re.compile(refused))
+        if os.environ.get('SERVER_DEBUG'): logger.setLevel(logging.DEBUG)
+        logger.info("Clients allowed: %s, refused: %s" % (self.clients_allowed, self.clients_refused))
+        logger.info("Remotes allowed: %s, refused: %s" % (self.remotes_allowed, self.remotes_refused))
+        logger.info("Resolve mapping: %s" % (self.resolve_list,))
 
     def finish(self):
         super(SocksProxy, self).finish()
@@ -151,6 +177,50 @@ class SocksProxy(BaseRequestHandler):
             return sock.sendall(msg)
         except Exception as e:
             raise ConnectionInterrupted('sock.sendall %s: %s' % (sock, e))
+
+    def resolve_addr_port(self, address, port):
+        resolved = self.resolve_map.get("%s:%s" % (address, port))
+        if resolved != None:
+            resolved_address, resolved_port = resolved.rsplit(":", 1)
+        else:
+            resolved = self.resolve_map.get(address)
+            if resolved != None:
+                resolved_address, resolved_port = resolved, port
+            else:
+                resolved_address, resolved_port = address, port
+        if (resolved_address, resolved_port) != (address, port):
+            return self.resolve_addr_port(resolved_address, resolved_port)
+        return (resolved_address, resolved_port)
+
+    def verify_client_addr(self, address):
+        white = False
+        for authorized in self.clients_re_white_list:
+            if authorized.match(address):
+                white = True
+                break
+        if not white: return False
+        black = False
+        for rejected in self.clients_re_black_list:
+            if rejected.match(address):
+                black = True
+                break
+        if black: return False
+        return True
+
+    def verify_remote_addr(self, address):
+        white = False
+        for authorized in self.remotes_re_white_list:
+            if authorized.match(address):
+                white = True
+                break
+        if not white: return False
+        black = False
+        for rejected in self.remotes_re_black_list:
+            if rejected.match(address):
+                black = True
+                break
+        if black: return False
+        return True
 
     def handle(self):
         logger.info('client %s: Accepting connection: %s' % (self.client_address, self.request))
@@ -197,13 +267,28 @@ class SocksProxy(BaseRequestHandler):
                 address = self.recvall(self.request, domain_length).decode('ascii')
             port = struct.unpack('!H', self.recvall(self.request, 2))[0]
 
-            logger.info("client %s: Received command %d for %s:%s" % (self.client_address, cmd, address, port))
-
             if cmd not in [SOCKS5_CMD_CONNECT]:
                 logger.error("client %s: Command not supported: %d (%s)" % (self.client_address, cmd, SOCKS5_CMDS.get(cmd, "unknown")))
                 reply = self.generate_failed_reply(0x07) # Command not supported
                 self.sendall(self.request, reply)
                 return
+
+            logger.info("client %s: Received command %d for %s:%s" % (self.client_address, cmd, address, port))
+
+            if not self.verify_client_addr(self.client_address[0]):
+                logger.error("client %s: client address '%s' rejected: returning connection refused" % (self.client_address, self.client_address[0]))
+                reply = self.generate_failed_reply(0x05) # Connection refused
+                self.sendall(self.request, reply)
+                return
+
+            if not self.verify_remote_addr(address):
+                logger.error("client %s: remote address '%s' rejected: returning connection refused" % (self.client_address, address))
+                reply = self.generate_failed_reply(0x05) # Connection refused
+                self.sendall(self.request, reply)
+                return
+
+            resolved_address, resolved_port = self.resolve_addr_port(address, port)
+            logger.info("client %s: resolved remote address '%s:%s' as: '%s:%s'" % (self.client_address, address, port, resolved_address, resolved_port))
 
             if self.proxy_host and self.proxy_port:
                 socket_class = socks.socksocket
@@ -214,14 +299,14 @@ class SocksProxy(BaseRequestHandler):
                 try:
                     if self.proxy_host and self.proxy_port:
                         remote.set_proxy(socks.SOCKS5, self.proxy_host, self.proxy_port, username=self.proxy_username, password=self.proxy_password)
-                    remote.connect((address, port))
+                    remote.connect((resolved_address, resolved_port))
                 except Exception as err:
                     logger.error("client %s: could not connect to remote: %s" % (self.client_address, err))
                     reply = self.generate_failed_reply(0x05) # Connection refused
                     self.sendall(self.request, reply)
                     return
 
-                logger.info('client %s: Connected to %s:%s: %s' % (self.client_address, address, port, remote))
+                logger.info('client %s: Connected to %s:%s: %s' % (self.client_address, resolved_address, resolved_port, remote))
 
                 bind_address = remote.getsockname()
                 addr = struct.unpack("!I", socket.inet_aton(bind_address[0]))[0]
@@ -280,7 +365,7 @@ class SocksProxy(BaseRequestHandler):
 
 
 if __name__ == '__main__':
-    host, port = sys.argv[1].split(":")
+    host, port = sys.argv[1].rsplit(":", 1)
     if host == "": host = 'localhost'
     elif host == "*": host = '0.0.0.0'
     port = int(port)
